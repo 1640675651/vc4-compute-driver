@@ -133,6 +133,7 @@ static int vc4_get_param_ioctl(struct drm_device *dev, void *data,
 	case DRM_VC4_PARAM_SUPPORTS_FIXED_RCL_ORDER:
 	case DRM_VC4_PARAM_SUPPORTS_MADVISE:
 	case DRM_VC4_PARAM_SUPPORTS_PERFMON:
+	case DRM_VC4_PARAM_SUPPORTS_QPU_COMPUTE:
 		args->value = true;
 		break;
 	default:
@@ -208,6 +209,10 @@ static const struct drm_ioctl_desc vc4_drm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(VC4_PERFMON_CREATE, vc4_perfmon_create_ioctl, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(VC4_PERFMON_DESTROY, vc4_perfmon_destroy_ioctl, DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(VC4_PERFMON_GET_VALUES, vc4_perfmon_get_values_ioctl, DRM_RENDER_ALLOW),
+	/* Need CAP_SYS_RAWIO, checked by the ioctls themselves */
+	DRM_IOCTL_DEF_DRV(VC4_SUBMIT_QPU, vc4_submit_qpu_ioctl, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(VC4_WAIT_QPU, vc4_wait_qpu_ioctl, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(VC4_QPU_BO_ADDR, vc4_qpu_bo_addr_ioctl, DRM_RENDER_ALLOW),
 };
 
 const struct drm_driver vc4_drm_driver = {

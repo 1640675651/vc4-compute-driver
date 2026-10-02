@@ -6,6 +6,7 @@
 #define _VC4_DRV_H_
 
 #include <linux/delay.h>
+#include <linux/hrtimer.h>
 #include <linux/of.h>
 #include <linux/refcount.h>
 #include <linux/uaccess.h>
@@ -23,6 +24,7 @@
 #include <kunit/test-bug.h>
 
 #include "uapi/drm/vc4_drm.h"
+#include "vc4_compute_drm.h"
 #include "vc4_regs.h"
 
 struct drm_device;
@@ -233,6 +235,23 @@ struct vc4_dev {
 		struct timer_list timer;
 		struct work_struct reset_work;
 	} hangcheck;
+
+	/* State of compute jobs (QPU user programs), see vc4_compute.c */
+	struct {
+		/* Polls for completion of the running compute job. */
+		struct hrtimer timer;
+		/* Set if a compute job timed out and its QPU programs could not be stopped. No more compute jobs
+		 * are accepted then.
+		 */
+		bool wedged;
+		/* Seqno and status (-ETIMEDOUT, -EIO) of the most recent failed compute job */
+		uint64_t failed_seqno;
+		int failed_status;
+		/* Compute jobs whose QPU programs might still be running. They are never freed, so the memory
+		 * of their BOs is never reused.
+		 */
+		struct list_head wedged_list;
+	} compute;
 
 	struct drm_modeset_lock ctm_state_lock;
 	struct drm_private_obj ctm_manager;
@@ -842,6 +861,17 @@ struct vc4_exec_info {
 	 * happen with a VC4_PACKET_TILE_BINNING_MODE_CONFIG packet.
 	 */
 	bool bin_bo_used;
+
+	/* Compute job: runs QPU user programs instead of bin/render control lists. */
+	bool is_compute;
+	/* Whether the compute job's programs were handed to the hardware. */
+	bool compute_started;
+	/* Whether the compute job ran into its timeout. */
+	bool compute_timed_out;
+	struct drm_vc4_qpu_program *qpu_programs;
+	uint32_t qpu_program_count;
+	uint32_t compute_timeout_ms;
+	ktime_t compute_start_time;
 };
 
 /* Per-open file private data. Any driver-specific resource that has to be
@@ -1050,6 +1080,8 @@ extern const struct dma_fence_ops vc4_fence_ops;
 extern struct platform_driver vc4_firmware_kms_driver;
 
 /* vc4_gem.c */
+struct drm_syncobj;
+struct ww_acquire_ctx;
 int vc4_gem_init(struct drm_device *dev);
 int vc4_submit_cl_ioctl(struct drm_device *dev, void *data,
 			struct drm_file *file_priv);
@@ -1067,6 +1099,27 @@ int vc4_queue_seqno_cb(struct drm_device *dev,
 		       struct vc4_seqno_cb *cb, uint64_t seqno,
 		       void (*func)(struct vc4_seqno_cb *cb));
 int vc4_gem_madvise_ioctl(struct drm_device *dev, void *data,
+			  struct drm_file *file_priv);
+void vc4_flush_caches(struct drm_device *dev);
+int vc4_lock_bo_reservations(struct drm_device *dev,
+			     struct vc4_exec_info *exec,
+			     struct ww_acquire_ctx *acquire_ctx);
+int vc4_queue_submit(struct drm_device *dev, struct vc4_exec_info *exec,
+		     struct ww_acquire_ctx *acquire_ctx,
+		     struct drm_syncobj *out_sync, uint64_t *seqno_out);
+void vc4_queue_hangcheck(struct drm_device *dev);
+void vc4_complete_exec(struct drm_device *dev, struct vc4_exec_info *exec);
+
+/* vc4_compute.c */
+void vc4_compute_init(struct vc4_dev *vc4);
+void vc4_compute_destroy(struct vc4_dev *vc4);
+void vc4_compute_start(struct drm_device *dev, struct vc4_exec_info *exec);
+void vc4_compute_cancel(struct drm_device *dev, struct vc4_exec_info *exec);
+int vc4_submit_qpu_ioctl(struct drm_device *dev, void *data,
+			 struct drm_file *file_priv);
+int vc4_wait_qpu_ioctl(struct drm_device *dev, void *data,
+		       struct drm_file *file_priv);
+int vc4_qpu_bo_addr_ioctl(struct drm_device *dev, void *data,
 			  struct drm_file *file_priv);
 
 /* vc4_hdmi.c */

@@ -144,6 +144,13 @@ vc4_cancel_bin_job(struct drm_device *dev)
 	if (!exec)
 		return;
 
+	/* A compute job which did not start yet waits for the render job
+	 * being reset, it is started once rendering finished. Running compute
+	 * jobs are handled by vc4_irq_reset().
+	 */
+	if (exec->is_compute)
+		return;
+
 	/* Stop the perfmon so that the next bin job can be started. */
 	if (exec->perfmon)
 		vc4_perfmon_stop(vc4, exec->perfmon, false);
@@ -182,11 +189,13 @@ vc4_irq_finish_render_job(struct drm_device *dev)
 	 * perfmon (this can be checked by comparing the perfmon attached to
 	 * the finished renderjob to the one attached to the next bin job: if
 	 * they don't match, this means the binner is stalled and should be
-	 * restarted).
+	 * restarted). A compute job waits for all rendering to finish, so it
+	 * needs to be started here too.
 	 */
 	if (nextrender)
 		vc4_submit_next_render_job(dev);
-	else if (nextbin && nextbin->perfmon != exec->perfmon)
+	else if (nextbin && (nextbin->is_compute ||
+			     nextbin->perfmon != exec->perfmon))
 		vc4_submit_next_bin_job(dev);
 
 	if (exec->fence) {
@@ -335,6 +344,7 @@ void vc4_irq_uninstall(struct drm_device *dev)
 void vc4_irq_reset(struct drm_device *dev)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
+	struct vc4_exec_info *exec;
 	unsigned long irqflags;
 
 	if (WARN_ON_ONCE(vc4->gen > VC4_GEN_4))
@@ -352,7 +362,16 @@ void vc4_irq_reset(struct drm_device *dev)
 	V3D_WRITE(V3D_INTENA, V3D_DRIVER_IRQS);
 
 	spin_lock_irqsave(&vc4->job_lock, irqflags);
-	vc4_cancel_bin_job(dev);
-	vc4_irq_finish_render_job(dev);
+	exec = vc4_first_bin_job(vc4);
+	if (exec && exec->is_compute && exec->compute_started) {
+		/* Nothing renders while a compute job runs, so do not
+		 * force-complete a render job the next bin job might have
+		 * started.
+		 */
+		vc4_compute_cancel(dev, exec);
+	} else {
+		vc4_cancel_bin_job(dev);
+		vc4_irq_finish_render_job(dev);
+	}
 	spin_unlock_irqrestore(&vc4->job_lock, irqflags);
 }

@@ -4,6 +4,7 @@
 # core driver code
 vc4-y := \
 	vc4_bo.o \
+	vc4_compute.o \
 	vc4_crtc.o \
 	vc4_drv.o \
 	vc4_dpi.o \

@@ -36,7 +36,7 @@
 #include "vc4_regs.h"
 #include "vc4_trace.h"
 
-static void
+void
 vc4_queue_hangcheck(struct drm_device *dev)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
@@ -336,6 +336,12 @@ vc4_hangcheck_elapsed(struct timer_list *t)
 	bin_exec = vc4_first_bin_job(vc4);
 	render_exec = vc4_first_render_job(vc4);
 
+	/* Compute jobs have no control list to make progress on, they are
+	 * covered by their own timeout (see vc4_compute.c).
+	 */
+	if (bin_exec && bin_exec->is_compute)
+		bin_exec = NULL;
+
 	/* If idle, we can stop watching for hangs. */
 	if (!bin_exec && !render_exec) {
 		spin_unlock_irqrestore(&vc4->job_lock, irqflags);
@@ -431,7 +437,7 @@ vc4_wait_for_seqno(struct drm_device *dev, uint64_t seqno, uint64_t timeout_ns,
 	return ret;
 }
 
-static void
+void
 vc4_flush_caches(struct drm_device *dev)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
@@ -481,6 +487,14 @@ again:
 	exec = vc4_first_bin_job(vc4);
 	if (!exec)
 		return;
+
+	if (exec->is_compute) {
+		/* Starts the job unless there is still a render job running,
+		 * in which case it is started when rendering finished.
+		 */
+		vc4_compute_start(dev, exec);
+		return;
+	}
 
 	vc4_flush_caches(dev);
 
@@ -561,7 +575,11 @@ vc4_update_bo_seqnos(struct vc4_exec_info *exec, uint64_t seqno)
 		bo = to_vc4_bo(exec->bo[i]);
 		bo->seqno = seqno;
 
+		/* QPU user programs might write to any of their BOs. */
+		if (exec->is_compute)
+			bo->write_seqno = seqno;
 		dma_resv_add_fence(bo->base.base.resv, exec->fence,
+				   exec->is_compute ? DMA_RESV_USAGE_WRITE :
 				   DMA_RESV_USAGE_READ);
 	}
 
@@ -598,7 +616,7 @@ vc4_unlock_bo_reservations(struct drm_device *dev,
  * (all of which are on exec->unref_list).  They're entirely private
  * to vc4, so we don't attach dma-buf fences to them.
  */
-static int
+int
 vc4_lock_bo_reservations(struct drm_device *dev,
 			 struct vc4_exec_info *exec,
 			 struct ww_acquire_ctx *acquire_ctx)
@@ -677,10 +695,10 @@ retry:
  * then bump the end address.  That's a change for a later date,
  * though.
  */
-static int
+int
 vc4_queue_submit(struct drm_device *dev, struct vc4_exec_info *exec,
 		 struct ww_acquire_ctx *acquire_ctx,
-		 struct drm_syncobj *out_sync)
+		 struct drm_syncobj *out_sync, uint64_t *seqno_out)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 	struct vc4_exec_info *renderjob;
@@ -697,6 +715,9 @@ vc4_queue_submit(struct drm_device *dev, struct vc4_exec_info *exec,
 
 	seqno = ++vc4->emit_seqno;
 	exec->seqno = seqno;
+	/* The job might already be freed when we return */
+	if (seqno_out)
+		*seqno_out = seqno;
 
 	dma_fence_init(&fence->base, &vc4_fence_ops, &vc4->job_lock,
 		       vc4->dma_fence_context, exec->seqno);
@@ -915,7 +936,7 @@ fail:
 	return ret;
 }
 
-static void
+void
 vc4_complete_exec(struct drm_device *dev, struct vc4_exec_info *exec)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
@@ -961,6 +982,7 @@ vc4_complete_exec(struct drm_device *dev, struct vc4_exec_info *exec)
 
 	vc4_v3d_pm_put(vc4);
 
+	kfree(exec->qpu_programs);
 	kfree(exec);
 }
 
@@ -1240,7 +1262,7 @@ vc4_submit_cl_ioctl(struct drm_device *dev, void *data,
 	 */
 	exec->args = NULL;
 
-	ret = vc4_queue_submit(dev, exec, &acquire_ctx, out_sync);
+	ret = vc4_queue_submit(dev, exec, &acquire_ctx, out_sync, NULL);
 
 	/* The syncobj isn't part of the exec data and we need to free our
 	 * reference even if job submission failed.
@@ -1284,6 +1306,8 @@ int vc4_gem_init(struct drm_device *dev)
 
 	INIT_WORK(&vc4->job_done_work, vc4_job_done_work);
 
+	vc4_compute_init(vc4);
+
 	ret = drmm_mutex_init(dev, &vc4->power_lock);
 	if (ret)
 		return ret;
@@ -1305,6 +1329,8 @@ static void vc4_gem_destroy(struct drm_device *dev, void *unused)
 	 * unregistering V3D.
 	 */
 	WARN_ON(vc4->emit_seqno != vc4->finished_seqno);
+
+	vc4_compute_destroy(vc4);
 
 	/* V3D should already have disabled its interrupt and cleared
 	 * the overflow allocation registers.  Now free the object.
