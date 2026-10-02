@@ -491,6 +491,10 @@ static int vc4_v3d_bind(struct device *dev, struct device *master, void *data)
 
 	pm_runtime_use_autosuspend(dev);
 	pm_runtime_set_autosuspend_delay(dev, 40); /* a little over 2 frames. */
+	/* Backported from rpi-6.12.y: Without dropping the reference taken above, V3D never runtime suspends, and
+	 * vc4_reset() cannot power-cycle it.
+	 */
+	pm_runtime_put_autosuspend(dev);
 
 	return 0;
 
