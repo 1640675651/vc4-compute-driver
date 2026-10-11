@@ -510,6 +510,7 @@ again:
 	if (exec->ct0ca != exec->ct0ea) {
 		trace_vc4_submit_cl(dev, false, exec->seqno, exec->ct0ca,
 				    exec->ct0ea);
+		vc4_job_stats_start(exec, VC4_BIN);
 		submit_cl(dev, 0, exec->ct0ca, exec->ct0ea);
 	} else {
 		struct vc4_exec_info *next;
@@ -548,6 +549,7 @@ vc4_submit_next_render_job(struct drm_device *dev)
 	vc4_flush_texture_caches(dev);
 
 	trace_vc4_submit_cl(dev, true, exec->seqno, exec->ct1ca, exec->ct1ea);
+	vc4_job_stats_start(exec, VC4_RENDER);
 	submit_cl(dev, 1, exec->ct1ca, exec->ct1ea);
 }
 
@@ -563,6 +565,100 @@ vc4_move_job_to_render(struct drm_device *dev, struct vc4_exec_info *exec)
 	list_move_tail(&exec->head, &vc4->render_job_list);
 	if (was_empty)
 		vc4_submit_next_render_job(dev);
+}
+
+const char *vc4_queue_name(enum vc4_queue queue)
+{
+	switch (queue) {
+	case VC4_BIN:
+		return "bin";
+	case VC4_RENDER:
+		return "render";
+	case VC4_COMPUTE:
+		return "compute";
+	default:
+		return "unknown";
+	}
+}
+
+static void vc4_stats_end(struct vc4_stats *stats, u64 now_ns)
+{
+	/* A bin job cancelled by a GPU reset might never have started */
+	if (!stats->start_ns)
+		return;
+
+	stats->enabled_ns += now_ns - stats->start_ns;
+	stats->start_ns = 0;
+	stats->jobs++;
+}
+
+/* Records that @exec started running on @queue, for the GPU time stats of the
+ * device and of the DRM file that submitted the job.
+ *
+ * The job_lock should be held during this.
+ */
+void vc4_job_stats_start(struct vc4_exec_info *exec, enum vc4_queue queue)
+{
+	struct vc4_dev *vc4 = exec->dev;
+	u64 now_ns = ktime_get_ns();
+
+	lockdep_assert_held(&vc4->job_lock);
+
+	vc4->stats[queue].start_ns = now_ns;
+	if (exec->vc4file)
+		exec->vc4file->stats[queue].start_ns = now_ns;
+}
+
+/* Records that @exec stopped running on @queue, because it finished or was
+ * cancelled by a GPU reset.
+ *
+ * The job_lock should be held during this.
+ */
+void vc4_job_stats_end(struct vc4_exec_info *exec, enum vc4_queue queue)
+{
+	struct vc4_dev *vc4 = exec->dev;
+	u64 now_ns = ktime_get_ns();
+
+	lockdep_assert_held(&vc4->job_lock);
+
+	vc4_stats_end(&vc4->stats[queue], now_ns);
+	if (exec->vc4file)
+		vc4_stats_end(&exec->vc4file->stats[queue], now_ns);
+}
+
+/* The GPU time spent on a queue up to @now_ns, including the running job.
+ * @now_ns must be read with the job_lock held, so it is not before the start
+ * of the running job.
+ */
+u64 vc4_stats_runtime(const struct vc4_stats *stats, u64 now_ns)
+{
+	u64 runtime = stats->enabled_ns;
+
+	if (stats->start_ns)
+		runtime += now_ns - stats->start_ns;
+
+	return runtime;
+}
+
+/* Detaches the queued and running jobs of @vc4file from it, before it is
+ * freed. Their GPU time is then only counted for the device.
+ */
+void vc4_job_stats_close_file(struct vc4_file *vc4file)
+{
+	struct vc4_dev *vc4 = vc4file->dev;
+	struct vc4_exec_info *exec;
+	unsigned long irqflags;
+
+	spin_lock_irqsave(&vc4->job_lock, irqflags);
+	list_for_each_entry(exec, &vc4->bin_job_list, head) {
+		if (exec->vc4file == vc4file)
+			exec->vc4file = NULL;
+	}
+	list_for_each_entry(exec, &vc4->render_job_list, head) {
+		if (exec->vc4file == vc4file)
+			exec->vc4file = NULL;
+	}
+	spin_unlock_irqrestore(&vc4->job_lock, irqflags);
 }
 
 static void
@@ -1180,6 +1276,7 @@ vc4_submit_cl_ioctl(struct drm_device *dev, void *data,
 		return -ENOMEM;
 	}
 	exec->dev = vc4;
+	exec->vc4file = vc4file;
 
 	ret = vc4_v3d_pm_get(vc4);
 	if (ret) {

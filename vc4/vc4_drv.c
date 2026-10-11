@@ -35,6 +35,8 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fbdev_dma.h>
+#include <drm/drm_file.h>
+#include <drm/drm_print.h>
 #include <drm/drm_vblank.h>
 
 #include <soc/bcm2835/raspberrypi-firmware.h>
@@ -173,8 +175,37 @@ static void vc4_close(struct drm_device *dev, struct drm_file *file)
 	if (vc4file->bin_bo_used)
 		vc4_v3d_bin_bo_put(vc4);
 
+	vc4_job_stats_close_file(vc4file);
 	vc4_perfmon_close_file(vc4file);
 	kfree(vc4file);
+}
+
+/* Prints the GPU time and memory usage of a DRM file, see
+ * Documentation/gpu/drm-usage-stats.rst
+ */
+static void vc4_show_fdinfo(struct drm_printer *p, struct drm_file *file)
+{
+	struct vc4_dev *vc4 = to_vc4_dev(file->minor->dev);
+	struct vc4_file *vc4file = file->driver_priv;
+	struct vc4_stats stats[VC4_MAX_QUEUES];
+	enum vc4_queue queue;
+	unsigned long irqflags;
+	u64 now_ns;
+
+	spin_lock_irqsave(&vc4->job_lock, irqflags);
+	now_ns = ktime_get_ns();
+	memcpy(stats, vc4file->stats, sizeof(stats));
+	spin_unlock_irqrestore(&vc4->job_lock, irqflags);
+
+	for (queue = 0; queue < VC4_MAX_QUEUES; queue++) {
+		drm_printf(p, "drm-engine-%s:\t%llu ns\n",
+			   vc4_queue_name(queue),
+			   vc4_stats_runtime(&stats[queue], now_ns));
+		drm_printf(p, "vc4-jobs-%s:\t%llu jobs\n",
+			   vc4_queue_name(queue), stats[queue].jobs);
+	}
+
+	drm_show_memory_stats(p, file);
 }
 
 struct drm_gem_object *
@@ -190,7 +221,11 @@ vc4_prime_import_sg_table(struct drm_device *dev,
 	return drm_gem_dma_prime_import_sg_table(dev, attach, sgt);
 }
 
-DEFINE_DRM_GEM_FOPS(vc4_drm_fops);
+static const struct file_operations vc4_drm_fops = {
+	.owner = THIS_MODULE,
+	DRM_GEM_FOPS,
+	.show_fdinfo = drm_show_fdinfo,
+};
 
 static const struct drm_ioctl_desc vc4_drm_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(VC4_SUBMIT_CL, vc4_submit_cl_ioctl, DRM_RENDER_ALLOW),
@@ -223,6 +258,7 @@ const struct drm_driver vc4_drm_driver = {
 			    DRIVER_SYNCOBJ),
 	.open = vc4_open,
 	.postclose = vc4_close,
+	.show_fdinfo = vc4_show_fdinfo,
 
 #if defined(CONFIG_DEBUG_FS)
 	.debugfs_init = vc4_debugfs_init,

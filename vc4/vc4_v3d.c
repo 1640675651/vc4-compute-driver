@@ -415,6 +415,37 @@ int vc4_v3d_debugfs_init(struct drm_minor *minor)
 	return 0;
 }
 
+/* GPU time of all jobs since boot, in the format of the v3d driver's
+ * gpu_stats: one line per queue with the current time, the number of jobs
+ * that ran and the time they ran, all times in ns of CLOCK_MONOTONIC.
+ */
+static ssize_t gpu_stats_show(struct device *dev, struct device_attribute *attr,
+			      char *buf)
+{
+	struct drm_device *drm = dev_get_drvdata(dev);
+	struct vc4_dev *vc4 = to_vc4_dev(drm);
+	struct vc4_stats stats[VC4_MAX_QUEUES];
+	enum vc4_queue queue;
+	unsigned long irqflags;
+	u64 now_ns;
+	int len;
+
+	spin_lock_irqsave(&vc4->job_lock, irqflags);
+	now_ns = ktime_get_ns();
+	memcpy(stats, vc4->stats, sizeof(stats));
+	spin_unlock_irqrestore(&vc4->job_lock, irqflags);
+
+	len = sysfs_emit(buf, "queue\ttimestamp\tjobs\truntime\n");
+	for (queue = 0; queue < VC4_MAX_QUEUES; queue++)
+		len += sysfs_emit_at(buf, len, "%s\t%llu\t%llu\t%llu\n",
+				     vc4_queue_name(queue), now_ns,
+				     stats[queue].jobs,
+				     vc4_stats_runtime(&stats[queue], now_ns));
+
+	return len;
+}
+static DEVICE_ATTR_RO(gpu_stats);
+
 static int vc4_v3d_bind(struct device *dev, struct device *master, void *data)
 {
 	struct platform_device *pdev = to_platform_device(dev);
@@ -489,6 +520,10 @@ static int vc4_v3d_bind(struct device *dev, struct device *master, void *data)
 		goto err_put_runtime_pm;
 	}
 
+	/* On the DRM device, so it is /sys/class/drm/card0/device/gpu_stats */
+	if (device_create_file(drm->dev, &dev_attr_gpu_stats))
+		DRM_WARN("Failed to create the gpu_stats sysfs file\n");
+
 	pm_runtime_use_autosuspend(dev);
 	pm_runtime_set_autosuspend_delay(dev, 40); /* a little over 2 frames. */
 	/* Backported from rpi-6.12.y: Without dropping the reference taken above, V3D never runtime suspends, and
@@ -510,6 +545,7 @@ static void vc4_v3d_unbind(struct device *dev, struct device *master,
 	struct drm_device *drm = dev_get_drvdata(master);
 	struct vc4_dev *vc4 = to_vc4_dev(drm);
 
+	device_remove_file(drm->dev, &dev_attr_gpu_stats);
 	vc4_irq_uninstall(drm);
 
 	/* Disable the binner's overflow memory address, so the next

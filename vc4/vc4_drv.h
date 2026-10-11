@@ -89,6 +89,28 @@ enum vc4_gen {
 	VC4_GEN_6,
 };
 
+/* The parts of V3D that run jobs, each one job at a time. Binning of a job
+ * can overlap with rendering of the previous one, a compute job runs alone.
+ */
+enum vc4_queue {
+	VC4_BIN,
+	VC4_RENDER,
+	VC4_COMPUTE,
+	VC4_MAX_QUEUES,
+};
+
+/* GPU time spent on one queue, by the whole device or by one DRM file.
+ * Protected by vc4->job_lock.
+ */
+struct vc4_stats {
+	/* ktime_get_ns() at the start of the running job, 0 if none runs */
+	u64 start_ns;
+	/* Run time of all jobs that are not running anymore */
+	u64 enabled_ns;
+	/* Number of jobs that stopped running */
+	u64 jobs;
+};
+
 struct vc4_dev {
 	struct drm_device base;
 	struct device *dev;
@@ -252,6 +274,11 @@ struct vc4_dev {
 		 */
 		struct list_head wedged_list;
 	} compute;
+
+	/* GPU time of all jobs, also of DRM files that were closed since.
+	 * Protected by job_lock.
+	 */
+	struct vc4_stats stats[VC4_MAX_QUEUES];
 
 	struct drm_modeset_lock ctm_state_lock;
 	struct drm_private_obj ctm_manager;
@@ -872,6 +899,12 @@ struct vc4_exec_info {
 	uint32_t qpu_program_count;
 	uint32_t compute_timeout_ms;
 	ktime_t compute_start_time;
+
+	/* The DRM file that submitted the job, for its GPU time stats. Set to
+	 * NULL by vc4_close() if the file is closed before the job finished.
+	 * Protected by job_lock once the job is queued.
+	 */
+	struct vc4_file *vc4file;
 };
 
 /* Per-open file private data. Any driver-specific resource that has to be
@@ -886,6 +919,9 @@ struct vc4_file {
 	} perfmon;
 
 	bool bin_bo_used;
+
+	/* GPU time of the jobs of this file, protected by vc4->job_lock */
+	struct vc4_stats stats[VC4_MAX_QUEUES];
 };
 
 static inline struct vc4_exec_info *
@@ -1109,6 +1145,11 @@ int vc4_queue_submit(struct drm_device *dev, struct vc4_exec_info *exec,
 		     struct drm_syncobj *out_sync, uint64_t *seqno_out);
 void vc4_queue_hangcheck(struct drm_device *dev);
 void vc4_complete_exec(struct drm_device *dev, struct vc4_exec_info *exec);
+const char *vc4_queue_name(enum vc4_queue queue);
+void vc4_job_stats_start(struct vc4_exec_info *exec, enum vc4_queue queue);
+void vc4_job_stats_end(struct vc4_exec_info *exec, enum vc4_queue queue);
+u64 vc4_stats_runtime(const struct vc4_stats *stats, u64 now_ns);
+void vc4_job_stats_close_file(struct vc4_file *vc4file);
 
 /* vc4_compute.c */
 void vc4_compute_init(struct vc4_dev *vc4);

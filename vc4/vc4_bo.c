@@ -754,8 +754,25 @@ static const struct vm_operations_struct vc4_vm_ops = {
 	.close = drm_gem_vm_close,
 };
 
+/* For the memory stats in fdinfo. Called with the DRM file's table_lock held,
+ * so madv_lock cannot be taken, a stale madv only makes the stats stale.
+ */
+static enum drm_gem_object_status vc4_gem_object_status(struct drm_gem_object *obj)
+{
+	u32 madv = READ_ONCE(to_vc4_bo(obj)->madv);
+	enum drm_gem_object_status status = 0;
+
+	if (madv != __VC4_MADV_PURGED)
+		status |= DRM_GEM_OBJECT_RESIDENT;
+	if (madv == VC4_MADV_DONTNEED)
+		status |= DRM_GEM_OBJECT_PURGEABLE;
+
+	return status;
+}
+
 static const struct drm_gem_object_funcs vc4_gem_object_funcs = {
 	.free = vc4_free_object,
+	.status = vc4_gem_object_status,
 	.export = vc4_prime_export,
 	.get_sg_table = drm_gem_dma_object_get_sg_table,
 	.vmap = drm_gem_dma_object_vmap,

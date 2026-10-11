@@ -78,6 +78,8 @@ static void vc4_compute_finish(struct drm_device *dev,
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 
+	vc4_job_stats_end(exec, VC4_COMPUTE);
+
 	/* Give the VPM back to the vertex pipeline, as vc4_v3d_init_hw() */
 	V3D_WRITE(V3D_VPMBASE, 0);
 
@@ -187,6 +189,7 @@ void vc4_compute_start(struct drm_device *dev, struct vc4_exec_info *exec)
 	}
 
 	exec->compute_start_time = ktime_get();
+	vc4_job_stats_start(exec, VC4_COMPUTE);
 	hrtimer_start(&vc4->compute.timer, ns_to_ktime(VC4_COMPUTE_POLL_FAST_NS),
 		      HRTIMER_MODE_REL);
 }
@@ -346,6 +349,7 @@ int vc4_submit_qpu_ioctl(struct drm_device *dev, void *data,
 	if (!exec)
 		return -ENOMEM;
 	exec->dev = vc4;
+	exec->vc4file = file_priv->driver_priv;
 	exec->is_compute = true;
 	exec->compute_timeout_ms = args->timeout_ms ?:
 				   VC4_COMPUTE_DEFAULT_TIMEOUT_MS;
